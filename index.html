@@ -6,8 +6,135 @@
         <script src="https://raw.githack.com/donmccurdy/aframe-extras/master/dist/aframe-extras.loaders.min.js"></script>
         <script src="https://raw.githack.com/AR-js-org/studio-backend/master/src/modules/marker/tools/gesture-detector.js"></script>
         <script src="https://raw.githack.com/AR-js-org/studio-backend/master/src/modules/marker/tools/gesture-handler.js"></script>
-    </head>
+        <script>
+            /**
+             * Adds two interactions on top of the existing pinch/drag gestures:
+             *  - press and hold (without dragging) -> model spins continuously
+             *  - double tap                        -> swaps between two glTF models
+             */
+            AFRAME.registerComponent('tap-hold-swap', {
+                schema: {
+                    modelA: { default: '#animated-asset' },
+                    modelB: { default: '#glitchtrap-asset' },
+                    holdDelay: { default: 400 },        // ms of stillness before a "hold" starts
+                    holdRotationSpeed: { default: 90 },  // degrees per second while holding
+                    moveTolerance: { default: 12 },      // px allowed before it counts as a drag
+                    doubleTapWindow: { default: 350 },   // ms allowed between two taps
+                },
 
+                init: function () {
+                    this.isHolding = false;
+                    this.movedTooFar = false;
+                    this.touchStart = null;
+                    this.holdTimer = null;
+                    this.lastTapTime = 0;
+                    this.currentModel = this.data.modelA;
+
+                    this.onTouchStart = this.onTouchStart.bind(this);
+                    this.onTouchMove = this.onTouchMove.bind(this);
+                    this.onTouchEnd = this.onTouchEnd.bind(this);
+                    this.onTouchCancel = this.onTouchCancel.bind(this);
+
+                    document.addEventListener('touchstart', this.onTouchStart, { passive: true });
+                    document.addEventListener('touchmove', this.onTouchMove, { passive: true });
+                    document.addEventListener('touchend', this.onTouchEnd, { passive: true });
+                    document.addEventListener('touchcancel', this.onTouchCancel, { passive: true });
+                },
+
+                remove: function () {
+                    document.removeEventListener('touchstart', this.onTouchStart);
+                    document.removeEventListener('touchmove', this.onTouchMove);
+                    document.removeEventListener('touchend', this.onTouchEnd);
+                    document.removeEventListener('touchcancel', this.onTouchCancel);
+                    clearTimeout(this.holdTimer);
+                },
+
+                onTouchStart: function (evt) {
+                    if (evt.touches.length !== 1) {
+                        // a second finger showed up - hand off to the pinch/scale gesture instead
+                        clearTimeout(this.holdTimer);
+                        this.isHolding = false;
+                        this.touchStart = null;
+                        return;
+                    }
+
+                    const touch = evt.touches[0];
+                    this.touchStart = { x: touch.clientX, y: touch.clientY, time: performance.now() };
+                    this.movedTooFar = false;
+
+                    clearTimeout(this.holdTimer);
+                    this.holdTimer = setTimeout(() => {
+                        if (!this.movedTooFar) {
+                            this.isHolding = true;
+                        }
+                    }, this.data.holdDelay);
+                },
+
+                onTouchMove: function (evt) {
+                    if (!this.touchStart || evt.touches.length !== 1) return;
+
+                    const touch = evt.touches[0];
+                    const dx = touch.clientX - this.touchStart.x;
+                    const dy = touch.clientY - this.touchStart.y;
+
+                    if (Math.sqrt(dx * dx + dy * dy) > this.data.moveTolerance) {
+                        this.movedTooFar = true;
+                        this.isHolding = false;
+                        clearTimeout(this.holdTimer);
+                    }
+                },
+
+                onTouchEnd: function () {
+                    clearTimeout(this.holdTimer);
+                    const wasHolding = this.isHolding;
+                    this.isHolding = false;
+
+                    if (!this.touchStart) return;
+
+                    const heldDuration = performance.now() - this.touchStart.time;
+                    const movedTooFar = this.movedTooFar;
+                    this.touchStart = null;
+
+                    // Only counts as a tap if it never turned into a hold or a drag
+                    if (!wasHolding && !movedTooFar && heldDuration < this.data.holdDelay) {
+                        const now = performance.now();
+                        if (now - this.lastTapTime < this.data.doubleTapWindow) {
+                            this.swapModel();
+                            this.lastTapTime = 0;
+                        } else {
+                            this.lastTapTime = now;
+                        }
+                    }
+                },
+
+                onTouchCancel: function () {
+                    clearTimeout(this.holdTimer);
+                    this.isHolding = false;
+                    this.touchStart = null;
+                },
+
+                swapModel: function () {
+                    this.currentModel = this.currentModel === this.data.modelA ? this.data.modelB : this.data.modelA;
+                    const el = this.el;
+                    const next = this.currentModel;
+
+                    // animation-mixer needs a clean removeAttribute before swapping gltf-model,
+                    // otherwise it errors out trying to reuse the old mesh/clips
+                    el.removeAttribute('gltf-model');
+                    requestAnimationFrame(() => {
+                        el.setAttribute('gltf-model', next);
+                    });
+                },
+
+                tick: function (time, timeDelta) {
+                    if (this.isHolding) {
+                        this.el.object3D.rotation.y +=
+                            (this.data.holdRotationSpeed * (timeDelta / 1000) * Math.PI) / 180;
+                    }
+                },
+            });
+        </script>
+    </head>
     <body style="margin: 0; overflow: hidden;">
         <a-scene
             vr-mode-ui="enabled: false;"
@@ -23,8 +150,11 @@
                     id="animated-asset"
                     src="assets/asset.glb"
                 ></a-asset-item>
+                <a-asset-item
+                    id="glitchtrap-asset"
+                    src="assets/fnaf_psx_style_glitchtrap.glb"
+                ></a-asset-item>
             </a-assets>
-
             <a-marker
                 id="animated-marker"
                 type="pattern"
@@ -42,9 +172,9 @@
                     gltf-model="#animated-asset"
                     class="clickable"
                     gesture-handler
+                    tap-hold-swap
                 ></a-entity>
             </a-marker>
-
             <a-entity camera></a-entity>
         </a-scene>
     </body>
